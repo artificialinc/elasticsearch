@@ -26,12 +26,14 @@ import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.core.SuppressForbidden;
 import org.elasticsearch.core.TimeValue;
 import org.elasticsearch.core.Tuple;
+import org.elasticsearch.env.Environment;
 import org.elasticsearch.mocksocket.MockHttpServer;
 import org.elasticsearch.test.ESTestCase;
 import org.elasticsearch.threadpool.TestThreadPool;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.junit.After;
 import org.junit.Before;
+import org.mockito.Mockito;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -39,6 +41,7 @@ import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.util.Base64;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Matcher;
@@ -76,7 +79,11 @@ public abstract class AbstractAzureServerTestCase extends ESTestCase {
         httpServer.start();
         secondaryHttpServer = MockHttpServer.createHttp(new InetSocketAddress(InetAddress.getLoopbackAddress(), 0), 0);
         secondaryHttpServer.start();
-        clientProvider = AzureClientProvider.create(threadPool, Settings.EMPTY);
+
+        Environment environment = Mockito.mock(Environment.class);
+        Map<String, String> environmentVariables = Map.of();
+
+        clientProvider = AzureClientProvider.create(threadPool, Settings.EMPTY, environment, environmentVariables::get);
         clientProvider.start();
         super.setUp();
     }

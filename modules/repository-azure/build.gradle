@@ -24,6 +24,9 @@ versions << [
   'azureJackson': '2.13.4',
   'azureJacksonDatabind': '2.13.4.2',
   'azureAvro': '12.5.3',
+  'azureIdentity': '1.9.2',
+  'azureMsall4j': '1.13.8',
+  'azureMsall4jPersistenceExtension': '1.2.0',
 
   'jakartaActivation': '1.2.1',
   'jakartaXMLBind': '2.3.2',
@@ -33,6 +36,12 @@ versions << [
   'reactorNetty': '1.0.24',
   'reactorCore': '3.4.23',
   'reactiveStreams': '1.0.4',
+
+  'jna': '5.10.0',
+  'jnaPlatform': '5.7.0',
+
+  'oauth2OidcSdk': '10.13.2',
+  'jsonSmart': '2.5.0',
 ]
 
 dependencies {
@@ -40,6 +49,13 @@ dependencies {
   api "com.azure:azure-storage-common:${versions.azureCommon}"
   api "com.azure:azure-core-http-netty:${versions.azureCoreHttpNetty}"
   api "com.azure:azure-core:${versions.azureCore}"
+  api "com.azure:azure-identity:${versions.azureIdentity}"
+  api "com.microsoft.azure:msal4j:${versions.azureMsall4j}"
+  api "com.microsoft.azure:msal4j-persistence-extension:${versions.azureMsall4jPersistenceExtension}"
+  api "net.java.dev.jna:jna:${versions.jna}"
+  api "net.java.dev.jna:jna-platform:${versions.jnaPlatform}"
+  api "com.nimbusds:oauth2-oidc-sdk:${versions.oauth2OidcSdk}"
+  api "net.minidev:json-smart:${versions.jsonSmart}"
   // jackson
   api "com.fasterxml.jackson.core:jackson-core:${versions.azureJackson}"
   api "com.fasterxml.jackson.core:jackson-databind:${versions.azureJacksonDatabind}"

@@ -28,6 +28,8 @@ import com.azure.core.http.HttpResponse;
 import com.azure.core.http.ProxyOptions;
 import com.azure.core.http.netty.NettyAsyncHttpClientBuilder;
 import com.azure.core.http.policy.HttpPipelinePolicy;
+import com.azure.identity.WorkloadIdentityCredential;
+import com.azure.identity.WorkloadIdentityCredentialBuilder;
 import com.azure.storage.blob.BlobServiceAsyncClient;
 import com.azure.storage.blob.BlobServiceClient;
 import com.azure.storage.blob.BlobServiceClientBuilder;
@@ -39,6 +41,7 @@ import org.elasticsearch.common.component.AbstractLifecycleComponent;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.core.TimeValue;
+import org.elasticsearch.env.Environment;
 import org.elasticsearch.repositories.azure.executors.PrivilegedExecutor;
 import org.elasticsearch.repositories.azure.executors.ReactorScheduledExecutorService;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -46,6 +49,8 @@ import org.elasticsearch.transport.netty4.NettyAllocator;
 
 import java.io.IOException;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -60,7 +65,8 @@ class AzureClientProvider extends AbstractLifecycleComponent {
     private static final TimeValue DEFAULT_MAX_CONNECTION_IDLE_TIME = TimeValue.timeValueSeconds(60);
     private static final int DEFAULT_MAX_CONNECTIONS = 50;
     private static final int DEFAULT_EVENT_LOOP_THREAD_COUNT = 1;
-    private static final int PENDING_CONNECTION_QUEUE_SIZE = -1; // see ConnectionProvider.ConnectionPoolSpec.pendingAcquireMaxCount
+    private static final int PENDING_CONNECTION_QUEUE_SIZE = -1; // see
+                                                                 // ConnectionProvider.ConnectionPoolSpec.pendingAcquireMaxCount
 
     static final Setting<Integer> EVENT_LOOP_THREAD_COUNT = Setting.intSetting(
         "repository.azure.http_client.event_loop_executor_thread_count",
@@ -95,13 +101,17 @@ class AzureClientProvider extends AbstractLifecycleComponent {
     private final ByteBufAllocator byteBufAllocator;
     private final LoopResources nioLoopResources;
     private volatile boolean closed = false;
+    private final Environment environment;
+    private final SystemEnvironment systemEnvironment;
 
     AzureClientProvider(
         ThreadPool threadPool,
         String reactorExecutorName,
         EventLoopGroup eventLoopGroup,
         ConnectionProvider connectionProvider,
-        ByteBufAllocator byteBufAllocator
+        ByteBufAllocator byteBufAllocator,
+        Environment environment,
+        SystemEnvironment systemEnvironment
     ) {
         this.threadPool = threadPool;
         this.reactorExecutorName = reactorExecutorName;
@@ -112,16 +122,25 @@ class AzureClientProvider extends AbstractLifecycleComponent {
         // hence we need to use the same instance across all the client instances
         // to avoid creating multiple connection pools.
         this.nioLoopResources = useNative -> eventLoopGroup;
+        this.environment = environment;
+        this.systemEnvironment = systemEnvironment;
     }
 
     static int eventLoopThreadsFromSettings(Settings settings) {
         return EVENT_LOOP_THREAD_COUNT.get(settings);
     }
 
-    static AzureClientProvider create(ThreadPool threadPool, Settings settings) {
+    static AzureClientProvider create(
+        ThreadPool threadPool,
+        Settings settings,
+        Environment environment,
+        SystemEnvironment systemEnvironment
+    ) {
         final ExecutorService eventLoopExecutor = threadPool.executor(NETTY_EVENT_LOOP_THREAD_POOL_NAME);
-        // Most of the code that needs special permissions (i.e. jackson serializers generation) is executed
-        // in the event loop executor. That's the reason why we should provide an executor that allows the
+        // Most of the code that needs special permissions (i.e. jackson serializers
+        // generation) is executed
+        // in the event loop executor. That's the reason why we should provide an
+        // executor that allows the
         // execution of privileged code
         final EventLoopGroup eventLoopGroup = new NioEventLoopGroup(
             eventLoopThreadsFromSettings(settings),
@@ -133,14 +152,23 @@ class AzureClientProvider extends AbstractLifecycleComponent {
 
         ConnectionProvider provider = ConnectionProvider.builder("azure-sdk-connection-pool")
             .maxConnections(MAX_OPEN_CONNECTIONS.get(settings))
-            .pendingAcquireMaxCount(PENDING_CONNECTION_QUEUE_SIZE) // This determines the max outstanding queued requests
+            .pendingAcquireMaxCount(PENDING_CONNECTION_QUEUE_SIZE) // This determines the max outstanding queued
+                                                                   // requests
             .pendingAcquireTimeout(Duration.ofMillis(openConnectionTimeout.millis()))
             .maxIdleTime(Duration.ofMillis(maxIdleTime.millis()))
             .build();
 
         // Just to verify that this executor exists
         threadPool.executor(REPOSITORY_THREAD_POOL_NAME);
-        return new AzureClientProvider(threadPool, REPOSITORY_THREAD_POOL_NAME, eventLoopGroup, provider, NettyAllocator.getAllocator());
+        return new AzureClientProvider(
+            threadPool,
+            REPOSITORY_THREAD_POOL_NAME,
+            eventLoopGroup,
+            provider,
+            NettyAllocator.getAllocator(),
+            environment,
+            systemEnvironment
+        );
     }
 
     AzureBlobServiceClient createClient(
@@ -156,17 +184,48 @@ class AzureClientProvider extends AbstractLifecycleComponent {
 
         reactor.netty.http.client.HttpClient nettyHttpClient = reactor.netty.http.client.HttpClient.create(connectionProvider);
         nettyHttpClient = nettyHttpClient.port(80)
-            .wiretap(false)
             .resolver(DefaultAddressResolverGroup.INSTANCE)
             .runOn(nioLoopResources)
             .option(ChannelOption.ALLOCATOR, byteBufAllocator);
 
         final HttpClient httpClient = new NettyAsyncHttpClientBuilder(nettyHttpClient).disableBufferCopy(true).proxy(proxyOptions).build();
+        BlobServiceClientBuilder builder;
+        if (settings.useWorkloadIdentityCredential()) {
+            // Make sure the correct environment variables are set
+            if (this.systemEnvironment.getEnv("AZURE_CLIENT_ID") == null) {
+                throw new IllegalStateException("Unable to find the AZURE_CLIENT_ID environment variable");
+            }
+            if (this.systemEnvironment.getEnv("AZURE_TENANT_ID") == null) {
+                throw new IllegalStateException("Unable to find the AZURE_TENANT_ID environment variable");
+            }
+            if (this.systemEnvironment.getEnv("AZURE_FEDERATED_TOKEN_FILE") == null) {
+                throw new IllegalStateException("Unable to find the AZURE_FEDERATED_TOKEN_FILE environment variable");
+            }
+            // Make sure that a readable symlink to the token file exists in the plugin config directory
+            // AZURE_FEDERATED_TOKEN_FILE exists but we only use Azure Identity Tokens if a corresponding symlink exists and is readable
+            Path federatedIdentityTokenFileSymlink = this.environment.configFile().resolve("repository-azure/azure-federated-token-file");
+            if (Files.exists(federatedIdentityTokenFileSymlink) == false) {
+                throw new IllegalStateException("Unable to find a Web Identity Token symlink in the config directory");
+            }
+            if (Files.isReadable(federatedIdentityTokenFileSymlink) == false) {
+                throw new IllegalStateException("Unable to read a Web Identity Token symlink in the config directory");
+            }
+            WorkloadIdentityCredential workloadIdentityCredential = new WorkloadIdentityCredentialBuilder().clientId(
+                this.systemEnvironment.getEnv("AZURE_CLIENT_ID")
+            )
+                .tenantId(this.systemEnvironment.getEnv("AZURE_TENANT_ID"))
+                .tokenFilePath(federatedIdentityTokenFileSymlink.toString())
+                .build();
 
-        final String connectionString = settings.getConnectString();
-        BlobServiceClientBuilder builder = new BlobServiceClientBuilder().connectionString(connectionString)
-            .httpClient(httpClient)
-            .retryOptions(retryOptions);
+            // TODO: handle endpoint and endpointsuffix
+            builder = new BlobServiceClientBuilder().endpoint(String.format("https://%s.blob.core.windows.net", settings.getAccount()))
+                .credential(workloadIdentityCredential)
+                .httpClient(httpClient)
+                .retryOptions(retryOptions);
+        } else {
+            final String connectionString = settings.getConnectString();
+            builder = new BlobServiceClientBuilder().connectionString(connectionString).httpClient(httpClient).retryOptions(retryOptions);
+        }
 
         if (successfulRequestConsumer != null) {
             builder.addPolicy(new SuccessfulRequestTracker(successfulRequestConsumer));
@@ -202,8 +261,10 @@ class AzureClientProvider extends AbstractLifecycleComponent {
             }
         };
 
-        // The only way to configure the schedulers used by the SDK is to inject a new global factory. This is a bit ugly...
-        // See https://github.com/Azure/azure-sdk-for-java/issues/17272 for a feature request to avoid this need.
+        // The only way to configure the schedulers used by the SDK is to inject a new
+        // global factory. This is a bit ugly...
+        // See https://github.com/Azure/azure-sdk-for-java/issues/17272 for a feature
+        // request to avoid this need.
         Schedulers.setFactory(new Schedulers.Factory() {
             @Override
             public Scheduler newParallel(int parallelism, ThreadFactory threadFactory) {
@@ -261,5 +322,10 @@ class AzureClientProvider extends AbstractLifecycleComponent {
                 }
             }
         }
+    }
+
+    @FunctionalInterface
+    interface SystemEnvironment {
+        String getEnv(String name);
     }
 }

@@ -100,7 +100,7 @@ public class AzureRepositoryPlugin extends Plugin implements RepositoryPlugin, R
         AllocationService allocationService,
         IndicesService indicesService
     ) {
-        AzureClientProvider azureClientProvider = AzureClientProvider.create(threadPool, settings);
+        AzureClientProvider azureClientProvider = AzureClientProvider.create(threadPool, settings, environment, System::getenv);
         azureStoreService.set(createAzureStorageService(settings, azureClientProvider));
         return List.of(azureClientProvider);
     }

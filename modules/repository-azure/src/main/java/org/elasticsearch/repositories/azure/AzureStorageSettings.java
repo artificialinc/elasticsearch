@@ -129,6 +129,7 @@ final class AzureStorageSettings {
     private final String sasToken;
 
     private final String connectString;
+    private final boolean useWorkloadIdentityCredential;
     private final String endpointSuffix;
     private final TimeValue timeout;
     private final int maxRetries;
@@ -149,7 +150,14 @@ final class AzureStorageSettings {
     ) {
         this.account = account;
         this.sasToken = sasToken;
-        this.connectString = buildConnectString(account, key, sasToken, endpointSuffix, endpoint, secondaryEndpoint);
+        // If no sasToken or key is set, try to use workload identity credentials
+        if (Strings.hasText(sasToken) == false && Strings.hasText(key) == false) {
+            this.useWorkloadIdentityCredential = true;
+            this.connectString = "";
+        } else {
+            this.useWorkloadIdentityCredential = false;
+            this.connectString = buildConnectString(account, key, sasToken, endpointSuffix, endpoint, secondaryEndpoint);
+        }
         this.endpointSuffix = endpointSuffix;
         this.timeout = timeout;
         this.maxRetries = maxRetries;
@@ -191,6 +199,14 @@ final class AzureStorageSettings {
 
     public String getConnectString() {
         return connectString;
+    }
+
+    public String getAccount() {
+        return account;
+    }
+
+    public boolean useWorkloadIdentityCredential() {
+        return useWorkloadIdentityCredential;
     }
 
     private static String buildConnectString(
